@@ -1,34 +1,22 @@
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    Exit
+function Check-Admin {
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+        Exit
+    }
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-Write-Host "`nThis script executes the following:
-- SFC Scan
-- Check Disk
-- GP Update
-- Profile deletions
-- Cache Deletion
-- Outlook Cache delete
-If you would like to only remove a specific profile you will need to do it manually or use the other script in here.
-(Read the word/readme file for instructions)`n" -ForegroundColor Blue
-
 function Invoke-ContinueOrExit {
-    while($true) {
-        $choice = Read-Host -Prompt "Do you want to continue? (Y/N)"
-
-        switch($choice.Trim().ToUpper()) {
-            {$_ -in 'Y', 'YES'} {
-                return $true
-            }
-            {$_ -in 'N', 'NO'} {
-                return $false
-            }
-            Default {
-                Write-Host "Invalid input. Please enter 'Y' or 'N'" -ForegroundColor Yellow
-            }
-        }
-    }
+    $title = "Perform Cleanup Operations"
+    $message = "Do you want to continue?"
+    $options = [System.Management.Automation.Host.ChoiceDescription[]]@(
+        [System.Management.Automation.Host.ChoiceDescription]::new("&Yes", "Continue with the script"),
+        [System.Management.Automation.Host.ChoiceDescription]::new("&No", "Exit the script")
+    )
+    $result = $host.ui.PromptForChoice($title, $message, $options, 1)
+    return [bool]$result
 }
 
 #New Registry Pattern
@@ -60,7 +48,7 @@ class CleanFactory {
 
 class SFCScan : CleanMethod {
     [void] CleanOption() {
-        Write-Host "`nRunning System File Checker (SFC Scan Now)..." -ForegroundColor Blue
+        Write-Host "`nRunning SFC Scan..." -ForegroundColor Blue
         $SFCResult = sfc /scannow
         Write-Output $SFCResult
     }
@@ -73,9 +61,9 @@ class DiskCheck : CleanMethod {
         Write-Output Y | chkdsk C: /f /r /x | Out-Null
         $BootExecute = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name "BootExecute"
         if($BootExecute.BootExecute -match "autocheck chkntfs") {
-            Write-Host "CHKDSK successfully scheduled to run on next reboot..." -ForegroundColor Green
+            Write-Host "CheckDisk successfully scheduled to run on next reboot..." -ForegroundColor Green
         } else {
-            Write-Warning "CHDSK scheduling could not be verified. Check manually or rerun separately..."
+            Write-Warning "CheckDisk scheduling could not be verified. Check manually or rerun separately..."
         }
         [CleanFactory]::RestartRequired = $true
     }
@@ -84,7 +72,7 @@ class DiskCheck : CleanMethod {
 
 class GPUpdate : CleanMethod {
     [void] CleanOption() {
-        Write-Host "`nForcing Group Policy Update..." -ForegroundColor Blue
+        Write-Host "`nForcing GPUpdate..." -ForegroundColor Blue
         gpupdate /force /Logon /Boot
         [CleanFactory]::RestartRequired = $true
     }
@@ -101,9 +89,9 @@ class DeleteExcessProfiles : CleanMethod {
             Write-Host "Added '$CurrentUser' to the whitelist" -ForegroundColor DarkGray
         }
         Write-Host "Currently whitelisted profiles: $($WhiteList -join ", ")`n" -ForegroundColor DarkGray
+        
         $DaysOld = 45
         $CutDate = (Get-Date).AddDays(-$DaysOld[0])
-
         write-Host cutdate is $CutDate
         
         $ProfliesToDelete = Get-CimInstance -ClassName Win32_UserProfile | Where-Object {
@@ -111,7 +99,7 @@ class DeleteExcessProfiles : CleanMethod {
             ($_.LocalPath | Split-Path -Leaf) -notin $WhiteList -and
             $_.LastUseTime -lt $CutDate
         }
-        Write-Host "Found $($ProfliesToDelete.Count) profiles older than $DaysOld days that are not whitelisted." -ForegroundColor Yellow
+        Write-Host "Found $($ProfliesToDelete.Count) profiles older than $DaysOld days to delete" -ForegroundColor Yellow
         foreach($ProfileInstance in $ProfliesToDelete) {
             Write-Host "Deleting profile: $($ProfileInstance.LocalPath)" -ForegroundColor Green
             Remove-CimInstance -InputObject $ProfileInstance
@@ -123,30 +111,31 @@ class DeleteExcessProfiles : CleanMethod {
 class DeleteCacheInstances : CleanMethod {
     [void] CleanOption() {
         Write-Host "`nDeleting multiple cache instances..." -ForegroundColor Blue
-        $SystemTemp = $env:SystemRoot + "C:\Temp"
-        $UserTemp = $env:TEMP
         $DriveTemp = "C:\Temp"
+        $SystemTemp = $env:SystemRoot + $DriveTemp.Substring(2)
+        $UserTemp = $env:TEMP
         
         Format-List @($SystemTemp, $UserTemp, $DriveTemp) | ForEach-Object {
             if(Test-Path $_) {
-                Write-Output "Clearing: $_"
+                Write-Host "Clearing: $_"
                 Remove-Item -Path "$_\*" -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
         
+        # Clear SCCM Cache
         try {
             $CCMCache = New-Object -ComObject UIResource.UIResourceMgr
             $CacheInfo = $CCMCache.GetCacheInfo()
             $Elements = $CacheInfo.GetCacheElements()
         
             if($Elements) {
-                Write-Output "Found $($Elements.Count) items in CCM Cache. Deleting..."
+                Write-Host "Found $($Elements.Count) items in CCM Cache. Deleting..."
                 foreach ($Element in $Elements) {
                     $CacheInfo.DeleteCacheElement($Element.CacheElementID)
                 }
-                Write-Output "CCM Cache cleared safely" -ForegroundColor Green
+                Write-Host "CCM Cache cleared safely" -ForegroundColor Green
             } else {
-                Write-Output "CCM Cache is already empty" -ForegroundColor Magenta
+                Write-Host "CCM Cache is already empty" -ForegroundColor Magenta
             }
         } catch {
             Write-Warning "Failed to clear SCCM Cache: $_"
@@ -157,23 +146,17 @@ class DeleteCacheInstances : CleanMethod {
 
 class DeleteOutlookCache : CleanMethod {
     [void] CleanOption() {
-        Write-Output "`nClearing Outlook Cache..." -ForegroundColor Blue
+        Write-Host "`nClearing Outlook Cache..." -ForegroundColor Blue
         $OutlookProcess = Get-Process -Name "outlook" -ErrorAction SilentlyContinue
         
         if($OutlookProcess) {
             $OutlookProcess.CloseMainWindow() | Out-Null
-            $Timeout = 10
-            $Counter = 0
-            while((Get-Process -Name "outlook" -ErrorAction SilentlyContinue) -and ($Counter -lt $Timeout)) {
-                Start-Sleep -Seconds 1
-                $Counter++
-            }
-            if(Get-Process -Name "outlook" -ErrorAction SilentlyContinue) {
-                Write-Output "Outlook failed to close gracefully. Force Teminating..." -ForegroundColor Red
+            if(-not $OutlookProcess.WaitForExit(5000)) {
+                Write-Host "Outlook failed to close gracefully. Force Teminating..." -ForegroundColor Red
                 Stop-Process -Name "outlook" -Force
                 Start-Sleep -Seconds 2
             } else {
-                Write-Output "Outlook successfully terminated" -ForegroundColor Green
+                Write-Host "Outlook successfully terminated" -ForegroundColor Green
             }
         }
         
@@ -183,18 +166,18 @@ class DeleteOutlookCache : CleanMethod {
             if($OSTFiles) {
                 foreach($File in $OSTFiles) {
                     try {
-                        Write-Output "Attempting to delete: $($File.FullName)"
+                        Write-Host "Attempting to delete: $($File.FullName)"
                         Remove-Item -LiteralPath $File.FullName -Force -ErrorAction Stop
-                        Write-Output "Successfully deleted: $($File.Name)" -ForegroundColor Green
+                        Write-Host "Successfully deleted: $($File.Name)" -ForegroundColor Green
                     } catch {
                         Write-Error "Failed to delete $($File.Name)"
                     }
                 }
             } else {
-                Write-Output "No .ost files were found in the directory..." -ForegroundColor Magenta
+                Write-Host "No .ost files were found in the directory..." -ForegroundColor Magenta
             }
         } else {
-            Write-Output "Outlook data directory not found at $OSTFolder" -ForegroundColor Magenta
+            Write-Host "Outlook data directory not found at $OSTFolder" -ForegroundColor Magenta
         }
     }
 }
@@ -223,7 +206,7 @@ function Invoke-CleanOptions {
 }
 
 function Invoke-Restart {
-    $msgText = "Computer requires a restart to finish updates. Restart Now?"
+    $msgText = "Computer requires a restart to finish health checks. Restart Now?"
     $msgTitle = "System Restart Notice"
     $msgButton = [System.Windows.MessageBoxButton]::YesNo
     $msgIcon = [System.Windows.MessageBoxImage]::Warning
@@ -233,12 +216,18 @@ function Invoke-Restart {
 }
 
 function Invoke-UserIntegerInput {
-    $IsValid = $false
-
-    [CleanFactory]::CleanMethods.GetEnumerator() | ForEach-Object {
-        Write-Host "$($_.Key): $($_.Value.Method.Name)"
+    # [CleanFactory]::CleanMethods.GetEnumerator() | ForEach-Object {
+    #     Write-Host "$($_.Key): $($_.Value.Method)" -ForegroundColor Cyan
+    # }
+    foreach ($key in [System.Linq.Enumerable]::Reverse([object[]][CleanFactory]::CleanMethods.Keys)) {
+        $scriptBlock = [CleanFactory]::CleanMethods[$key]
+        $cmdAst = $scriptBlock.Ast.Find({ param($ast) $ast -is [System.Management.Automation.Language.CommandAst] }, $true)
+        $name = if ($cmdAst) { $cmdAst.CommandElements[1].Value } else { "Unknown" }
+        # Write-Host "$key : $([CleanFactory]::CleanMethods[$key].Value.Method)" -ForegroundColor Cyan
+        Write-Host "$key : $name" -ForegroundColor Cyan
     }
-
+    
+    $IsValid = $false
     do {
         $UserInput = Read-Host -Prompt "Please select an option"
         $ConvertedInput = $UserInput -as [uint32]
@@ -253,11 +242,15 @@ function Invoke-UserIntegerInput {
 
 
 function Invoke-Main {
-    Invoke-ContinueOrExit
+    # if(Invoke-ContinueOrExit) {
+    #     Write-Host "Exiting script..." -ForegroundColor DarkCyan
+    #     return
+    # }
+
     do {
         $MainInput = Invoke-UserIntegerInput
         Invoke-CleanOptions -Controller $MainInput
-        if ([CleanFactory]::RestartRequired) {
+        if([CleanFactory]::RestartRequired) {
             $UserResponse = Invoke-Restart
             if($UserResponse -eq 'Yes') {
                 try {
