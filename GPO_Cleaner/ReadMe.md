@@ -1,9 +1,7 @@
 # GP Output Cleaner
 This program is meant to parse the **Administrative Template** section of the gp report from the following command.
-
-`gpresult /scope:user /z > exampleUser.txt`
-
-`gpresult /scope:computer /z > exampleComp.txt`
+- `gpresult /scope:user /z > exampleUser.txt`
+- `gpresult /scope:computer /z > exampleComp.txt`
 
 It is best to extract this section into its own txt after the output file. Unfortunately there is more manual work required. This program is not extraneously automated.
 
