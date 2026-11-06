@@ -1,2 +1,2 @@
 # PSG
-Powershell scripts to automate for the super lazy
+Scripts & small programs to automate for the super lazy
